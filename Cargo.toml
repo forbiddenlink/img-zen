@@ -1,0 +1,21 @@
+[package]
+name = "imgzen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive", "env"] }
+glob = "0.3"
+image = { version = "0.24", default-features = false, features = ["jpeg", "png", "webp"] }
+lol_html = "1.1"
+rayon = "1.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.4"
+humansize = "2.1"
+ravif = "0.11"
+imgref = "1.10"
+webp = "0.2"
+oxipng = "9.0"
+rgb = "0.8"

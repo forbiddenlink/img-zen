@@ -1,0 +1,35 @@
+name: 'ImgZen - Automatic Image Optimizer'
+description: 'Automatically optimizes images (AVIF/WebP) and improves performance in your PRs.'
+author: 'ImgZen'
+branding:
+  icon: 'image'
+  color: 'purple'
+inputs:
+  paths:
+    description: 'Directories to scan for images (comma separated)'
+    required: false
+    default: './'
+  ignore:
+    description: 'Glob patterns to ignore (comma separated)'
+    required: false
+    default: 'node_modules/**, target/**, dist/**'
+  generate-formats:
+    description: 'Formats to generate (comma separated: avif, webp)'
+    required: false
+    default: 'avif, webp'
+  responsive-widths:
+    description: 'Widths to generate responsive versions for (comma separated, e.g. "640, 1024")'
+    required: false
+    default: ''
+  inject-lazy-loading:
+    description: 'Inject loading="lazy" into HTML images'
+    required: false
+    default: 'true'
+outputs:
+  saved-size:
+    description: 'Total size saved by optimization'
+  report:
+    description: 'Markdown report of the optimization'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
