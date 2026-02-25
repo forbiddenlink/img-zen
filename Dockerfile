@@ -2,13 +2,23 @@
 FROM rust:1.75-slim-bookworm as builder
 
 WORKDIR /usr/src/app
-COPY . .
 
-# Install build dependencies if needed (e.g., for avif/ravif via nasm if not pure native)
-# The 'image' crate with 'avif-native' might need some system deps or just static build.
-# For simplicity in 'avif-native' (ravif), it usually works out of box or needs nasm.
+# Install build dependencies
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
+# Copy only dependency files first for layer caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy src to build dependencies
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+
+# Build dependencies (this layer gets cached)
+RUN cargo build --release && rm -rf src target/release/deps/imgzen*
+
+# Copy actual source
+COPY src ./src
+
+# Build the real application
 RUN cargo build --release
 
 # Runtime Stage

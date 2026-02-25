@@ -25,6 +25,14 @@ inputs:
     description: 'Inject loading="lazy" into HTML images'
     required: false
     default: 'true'
+  quality:
+    description: 'Quality for AVIF/WebP/JPEG encoding (1-100)'
+    required: false
+    default: '75'
+  png-level:
+    description: 'PNG optimization level (0-6, higher = slower but smaller)'
+    required: false
+    default: '2'
 outputs:
   saved-size:
     description: 'Total size saved by optimization'
