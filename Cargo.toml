@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-clap = { version = "4.4", features = ["derive", "env"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 globset = "0.4"
 image = { version = "0.24", default-features = false, features = ["jpeg", "png", "webp"] }
 lol_html = "1.1"
