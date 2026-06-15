@@ -215,17 +215,15 @@ fn inject_lazy_loading(path: &Path) -> Result<()> {
     use lol_html::{HtmlRewriter, Settings, element};
     
     let mut rewriter = HtmlRewriter::new(
-        Settings {
-            element_content_handlers: vec![
+        Settings::new()
+            .append_element_content_handler(
                 element!("img", |el| {
                     if el.get_attribute("loading").is_none() {
                         el.set_attribute("loading", "lazy")?;
                     }
                     Ok(())
                 })
-            ],
-            ..Settings::default()
-        },
+            ),
         |c: &[u8]| {
             output.extend_from_slice(c);
         }
