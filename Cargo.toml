@@ -8,7 +8,7 @@ anyhow = "1.0"
 clap = { version = "4.6", features = ["derive", "env"] }
 globset = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-lol_html = "1.1"
+lol_html = "3.0"
 rayon = "1.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
