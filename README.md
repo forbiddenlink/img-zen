@@ -58,10 +58,19 @@ jobs:
 | Input | Description | Default |
 |-------|-------------|---------|
 | `paths` | Comma-separated list of directories to scan. | `./` |
-| `ignore` | Comma-separated list of glob patterns to ignore. | `node_modules/**, target/**, dist/**, .git/**` |
+| `ignore` | Comma-separated list of glob patterns to ignore. | `node_modules/**, target/**, dist/**` |
 | `generate-formats` | Formats to generate (avif, webp). | `avif, webp` |
 | `responsive-widths` | Comma-separated list of widths (px) to generate resized variants for. | `(Disabled)` |
 | `inject-lazy-loading` | Inject `loading="lazy"` into HTML `<img>` tags. | `true` |
+| `quality` | Quality for AVIF/WebP/JPEG encoding (1-100). | `75` |
+| `png-level` | PNG optimization level (0-6, higher = slower but smaller). | `2` |
+
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `saved-size` | Total size saved by optimization. |
+| `report` | Markdown report of the optimization. |
 
 ## Local Development & Testing
 
