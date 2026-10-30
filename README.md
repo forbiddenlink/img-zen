@@ -62,6 +62,7 @@ jobs:
 | `generate-formats` | Formats to generate (avif, webp). | `avif, webp` |
 | `responsive-widths` | Comma-separated list of widths (px) to generate resized variants for. | `(Disabled)` |
 | `inject-lazy-loading` | Inject `loading="lazy"` into HTML `<img>` tags. | `true` |
+| `inject-picture` | Wrap `<img>` tags that have generated AVIF/WebP variants in `<picture>` with `srcset` widths. The original `<img>` stays as the fallback. Images without variants, with their own `srcset`, or already in a `<picture>` are left alone. | `true` |
 | `quality` | Quality for AVIF/WebP/JPEG encoding (1-100). | `75` |
 | `png-level` | PNG optimization level (0-6, higher = slower but smaller). | `2` |
 
