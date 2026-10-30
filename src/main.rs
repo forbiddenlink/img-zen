@@ -29,6 +29,10 @@ struct Args {
     #[arg(short = 'l', long, env = "INPUT_INJECT_LAZY_LOADING", default_value = "true")]
     inject_lazy_loading: String,
 
+    /// Wrap images that have generated variants in <picture>
+    #[arg(long, env = "INPUT_INJECT_PICTURE", default_value = "true")]
+    inject_picture: String,
+
     /// Quality for AVIF/WebP/JPEG encoding (1-100)
     #[arg(short, long, env = "INPUT_QUALITY", default_value = "75")]
     quality: f32,
@@ -124,9 +128,10 @@ fn main() -> Result<()> {
         }
     });
 
-    // Lazy loading injection
-    if args.inject_lazy_loading == "true" {
-        println!("Injecting lazy loading...");
+    // HTML rewriting: lazy loading and <picture> wrapping
+    let picture = args.inject_picture == "true";
+    if args.inject_lazy_loading == "true" || picture {
+        println!("Rewriting HTML...");
         // Collect HTML files
         let mut html_files = Vec::new();
         for path in &paths {
@@ -142,10 +147,12 @@ fn main() -> Result<()> {
                 }
              }
         }
-        
+
+        let lazy = args.inject_lazy_loading == "true";
+        let picture_widths = if picture { Some(responsive_widths.as_slice()) } else { None };
         html_files.par_iter().for_each(|path| {
-            if let Err(e) = inject_lazy_loading(path) {
-                eprintln!("Failed to inject lazy loading in {:?}: {}", path, e);
+            if let Err(e) = rewrite_html(path, lazy, picture_widths) {
+                eprintln!("Failed to rewrite HTML in {:?}: {}", path, e);
             }
         });
     }
@@ -209,33 +216,124 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn inject_lazy_loading(path: &Path) -> Result<()> {
-    let content = std::fs::read_to_string(path)?;
+/// Candidate srcset entries (url, width) for one generated format of `src`, widest last.
+/// Only files that exist next to the HTML are listed, because the encoders skip variants
+/// that are not smaller than their source.
+fn variant_srcset(src: &str, ext: &str, base_dir: &Path, orig_width: u32, widths: &[u32]) -> Option<String> {
+    let dot = src.rfind('.')?;
+    let (stem, _) = src.split_at(dot);
+    let mut entries: Vec<(String, u32)> = Vec::new();
+    for &w in widths {
+        if w < orig_width {
+            let url = format!("{}-{}.{}", stem, w, ext);
+            if base_dir.join(&url).is_file() {
+                entries.push((url, w));
+            }
+        }
+    }
+    let url = format!("{}.{}", stem, ext);
+    if base_dir.join(&url).is_file() {
+        entries.push((url, orig_width));
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort_by_key(|(_, w)| *w);
+    entries.dedup_by_key(|(_, w)| *w);
+    Some(entries.iter().map(|(u, w)| format!("{} {}w", u, w)).collect::<Vec<_>>().join(", "))
+}
+
+/// Builds the `<picture><source>...` opening for a local raster `src`, or None when no variants exist.
+fn picture_open(src: &str, sizes: Option<&str>, base_dir: &Path, widths: &[u32]) -> Option<String> {
+    let lower = src.to_lowercase();
+    if src.is_empty()
+        || src.contains("://")
+        || src.starts_with('/')
+        || src.starts_with("data:")
+        || src.contains(['?', '#', '%'])
+        || !(lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png"))
+    {
+        return None;
+    }
+    let orig_width = image::image_dimensions(base_dir.join(src)).ok()?.0;
+    let mut html = String::new();
+    for (ext, mime) in [("avif", "image/avif"), ("webp", "image/webp")] {
+        if let Some(srcset) = variant_srcset(src, ext, base_dir, orig_width, widths) {
+            html.push_str(&format!("<source type=\"{}\" srcset=\"{}\"", mime, srcset));
+            if let Some(sizes) = sizes {
+                html.push_str(&format!(" sizes=\"{}\"", sizes.replace('"', "&quot;")));
+            }
+            html.push('>');
+        }
+    }
+    if html.is_empty() {
+        None
+    } else {
+        Some(format!("<picture>{}", html))
+    }
+}
+
+/// Rewrites one HTML document: optional `loading="lazy"`, optional `<picture>` wrapping.
+/// `picture_widths` is `Some(responsive widths)` to wrap images, `None` to leave them alone.
+/// Images already inside a `<picture>` or carrying their own `srcset` are never wrapped,
+/// which keeps repeated runs idempotent.
+fn rewrite_html_str(content: &str, base_dir: &Path, lazy: bool, picture_widths: Option<&[u32]>) -> Result<String> {
+    use lol_html::html_content::ContentType;
+    use lol_html::{element, end_tag, HtmlRewriter, Settings};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     let mut output = Vec::new();
-    use lol_html::{HtmlRewriter, Settings, element};
-    
+    let picture_depth = Rc::new(Cell::new(0usize));
+
     let mut rewriter = HtmlRewriter::new(
         Settings::new()
-            .append_element_content_handler(
-                element!("img", |el| {
-                    if el.get_attribute("loading").is_none() {
-                        el.set_attribute("loading", "lazy")?;
-                    }
+            .append_element_content_handler(element!("picture", {
+                let depth = Rc::clone(&picture_depth);
+                move |el| {
+                    depth.set(depth.get() + 1);
+                    let depth = Rc::clone(&depth);
+                    el.on_end_tag(end_tag!(move |_| {
+                        depth.set(depth.get().saturating_sub(1));
+                        Ok(())
+                    }))?;
                     Ok(())
-                })
-            ),
+                }
+            }))
+            .append_element_content_handler(element!("img", |el| {
+                if let Some(widths) = picture_widths {
+                    if picture_depth.get() == 0 && el.get_attribute("srcset").is_none() {
+                        if let Some(src) = el.get_attribute("src") {
+                            let sizes = el.get_attribute("sizes");
+                            if let Some(open) = picture_open(&src, sizes.as_deref(), base_dir, widths) {
+                                el.before(&open, ContentType::Html);
+                                el.after("</picture>", ContentType::Html);
+                            }
+                        }
+                    }
+                }
+                if lazy && el.get_attribute("loading").is_none() {
+                    el.set_attribute("loading", "lazy")?;
+                }
+                Ok(())
+            })),
         |c: &[u8]| {
             output.extend_from_slice(c);
-        }
+        },
     );
     rewriter.write(content.as_bytes())?;
     rewriter.end()?;
-    
-    let new_content = String::from_utf8(output)?;
+
+    Ok(String::from_utf8(output)?)
+}
+
+fn rewrite_html(path: &Path, lazy: bool, picture_widths: Option<&[u32]>) -> Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let new_content = rewrite_html_str(&content, base_dir, lazy, picture_widths)?;
     if new_content != content {
         std::fs::write(path, new_content)?;
     }
-    
     Ok(())
 }
 
@@ -380,3 +478,79 @@ fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths:
 // fn saved_len(path: &Path) -> Result<usize> {
 //    Ok(std::fs::metadata(path)?.len() as usize)
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fresh dir under target/ holding a 100x60 photo.png plus the given variant files.
+    fn fixture(name: &str, variants: &[&str]) -> std::path::PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::new(100, 60).save(dir.join("photo.png")).unwrap();
+        for v in variants {
+            std::fs::write(dir.join(v), b"x").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn wraps_img_with_variants_in_picture() {
+        let dir = fixture("wrap", &["photo.avif", "photo.webp", "photo-50.avif", "photo-50.webp"]);
+        let html = r#"<p><img class="hero" src="photo.png" alt="A"></p>"#;
+        let out = rewrite_html_str(html, &dir, true, Some(&[50])).unwrap();
+        assert_eq!(
+            out,
+            concat!(
+                r#"<p><picture>"#,
+                r#"<source type="image/avif" srcset="photo-50.avif 50w, photo.avif 100w">"#,
+                r#"<source type="image/webp" srcset="photo-50.webp 50w, photo.webp 100w">"#,
+                r#"<img class="hero" src="photo.png" alt="A" loading="lazy"></picture></p>"#
+            )
+        );
+    }
+
+    #[test]
+    fn only_lists_variants_that_exist() {
+        let dir = fixture("partial", &["photo.webp"]);
+        let out = rewrite_html_str(r#"<img src="photo.png">"#, &dir, false, Some(&[50])).unwrap();
+        assert_eq!(
+            out,
+            r#"<picture><source type="image/webp" srcset="photo.webp 100w"><img src="photo.png"></picture>"#
+        );
+    }
+
+    #[test]
+    fn leaves_images_without_variants_unchanged() {
+        let dir = fixture("none", &[]);
+        let html = r#"<img src="photo.png"><img src="missing.png"><img src="https://x.test/a.png"><img src="data:image/png;base64,AA==">"#;
+        let out = rewrite_html_str(html, &dir, false, Some(&[50])).unwrap();
+        assert_eq!(out, html);
+    }
+
+    #[test]
+    fn second_run_does_not_nest_pictures() {
+        let dir = fixture("idem", &["photo.avif", "photo.webp"]);
+        let once = rewrite_html_str(r#"<img src="photo.png">"#, &dir, true, Some(&[])).unwrap();
+        let twice = rewrite_html_str(&once, &dir, true, Some(&[])).unwrap();
+        assert_eq!(once, twice);
+        assert_eq!(once.matches("<picture>").count(), 1);
+    }
+
+    #[test]
+    fn skips_img_that_already_has_srcset_and_keeps_sizes() {
+        let dir = fixture("srcset", &["photo.avif"]);
+        let manual = r#"<img src="photo.png" srcset="photo.png 1x, photo@2x.png 2x">"#;
+        assert_eq!(rewrite_html_str(manual, &dir, false, Some(&[])).unwrap(), manual);
+        let sized = rewrite_html_str(r#"<img src="photo.png" sizes="50vw">"#, &dir, false, Some(&[])).unwrap();
+        assert!(sized.contains(r#"<source type="image/avif" srcset="photo.avif 100w" sizes="50vw">"#), "{sized}");
+    }
+
+    #[test]
+    fn disabled_picture_keeps_lazy_only() {
+        let dir = fixture("off", &["photo.avif"]);
+        let out = rewrite_html_str(r#"<img src="photo.png">"#, &dir, true, None).unwrap();
+        assert_eq!(out, r#"<img src="photo.png" loading="lazy">"#);
+    }
+}

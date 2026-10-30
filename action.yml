@@ -25,6 +25,10 @@ inputs:
     description: 'Inject loading="lazy" into HTML images'
     required: false
     default: 'true'
+  inject-picture:
+    description: 'Wrap HTML images that have generated AVIF/WebP variants in <picture>'
+    required: false
+    default: 'true'
   quality:
     description: 'Quality for AVIF/WebP/JPEG encoding (1-100)'
     required: false
