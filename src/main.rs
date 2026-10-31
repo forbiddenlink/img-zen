@@ -167,7 +167,7 @@ fn main() -> Result<()> {
     // GitHub Actions Output
     if env::var("GITHUB_ACTIONS").is_ok() {
         // Build per-file table
-        let mut file_table = String::from("| File | Original | Saved | Formats |\n|---|---|---|---|\n");
+        let mut file_table = String::from("| File | Original | Saved | Original re-encode saved | Formats |\n|---|---|---|---|---|\n");
         for fr in &final_stats.file_reports {
             let formats = if fr.generated_formats.is_empty() {
                 "-".to_string()
@@ -175,10 +175,11 @@ fn main() -> Result<()> {
                 fr.generated_formats.join(", ")
             };
             file_table.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} |\n",
                 fr.path,
                 humansize::format_size(fr.original_size, humansize::DECIMAL),
                 humansize::format_size(fr.saved_bytes, humansize::DECIMAL),
+                format_saved_percent(fr.original_size, fr.saved_bytes),
                 formats
             ));
         }
@@ -479,9 +480,35 @@ fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths:
 //    Ok(std::fs::metadata(path)?.len() as usize)
 // }
 
+/// Share of the original size recovered by the in-place re-encode, e.g. "12.5%".
+/// Returns "-" for a zero original size so the table never shows NaN or divides by zero.
+fn format_saved_percent(original_size: u64, saved_bytes: u64) -> String {
+    if original_size == 0 {
+        return "-".to_string();
+    }
+    format!("{:.1}%", saved_bytes as f64 / original_size as f64 * 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_percent_formats_one_decimal() {
+        assert_eq!(format_saved_percent(1000, 125), "12.5%");
+        assert_eq!(format_saved_percent(1000, 1000), "100.0%");
+    }
+
+    #[test]
+    fn saved_percent_zero_saved_is_zero_percent() {
+        assert_eq!(format_saved_percent(1000, 0), "0.0%");
+    }
+
+    #[test]
+    fn saved_percent_zero_original_has_no_nan() {
+        assert_eq!(format_saved_percent(0, 0), "-");
+        assert_eq!(format_saved_percent(0, 5), "-");
+    }
 
     /// Fresh dir under target/ holding a 100x60 photo.png plus the given variant files.
     fn fixture(name: &str, variants: &[&str]) -> std::path::PathBuf {
