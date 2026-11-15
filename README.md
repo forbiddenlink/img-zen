@@ -1,16 +1,16 @@
-# ImgZen 🖼️⚡
+# ImgZen
 
-**ImgZen** is a high-performance, automatic image optimizer for GitHub Actions, built with Rust. It makes your web assets lighter and faster without any configuration.
+A GitHub Action, written in Rust, that optimizes the images in a repository. It optimizes PNG files, generates AVIF and WebP variants, optionally generates resized copies, and rewrites your HTML to use lazy loading and `<picture>` elements. It is for developers with static sites who want smaller images without configuring a build pipeline.
 
 ## Features
 
-- **🚀 Performance-First**: Built with Rust for blazing speed in CI/CD pipelines.
-- **📦 Zero Configuration**: Works out of the box. Just add the action.
-- **✨ Modern Formats**: Automatically generates `AVIF` and `WebP` variants.
-- **📉 Smart Optimization**: Optimizes original PNG/JPEG files using industry-standard tools (`oxipng`).
-- **📱 Responsive Images**: Generates resized versions of your images for responsive layouts (configurable).
-- **⚡ Lazy Loading**: Automatically injects `loading="lazy"` into your HTML image tags (optional).
-- **📊 Detailed Reporting**: precise "Saved X MB" reports in your PRs.
+- Scans the folders you list for PNG and JPEG source images and optimizes PNG originals losslessly with `oxipng`.
+- Leaves JPEG originals untouched unless you set `lossy-jpeg: true` (lossy, re-encoded with `mozjpeg`; it drops EXIF, ICC and orientation data).
+- Generates `AVIF` and `WebP` variants next to each image.
+- Generates resized variants for the widths you give (off by default).
+- Rewrites HTML: adds `loading="lazy"` to `<img>` tags and wraps images that have variants in `<picture>` (both on by default; the original `<img>` stays as the fallback).
+- Writes a size-savings report to the job summary and to the `report` and `saved-size` outputs. It does not post comments on pull requests.
+- A `check` mode that changes no files and fails the step when a PNG could be optimized further, for gating CI without a bot commit.
 
 ## Usage
 
@@ -24,22 +24,20 @@ on:
       - '**.png'
       - '**.jpg'
       - '**.jpeg'
-      - '**.webp'
   pull_request:
     paths:
       - '**.png'
       - '**.jpg'
       - '**.jpeg'
-      - '**.webp'
 
 jobs:
   imgzen:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
+      - uses: actions/checkout@v4
+
       - name: Run ImgZen
-        uses: ./ # Or your-username/imgzen@v1
+        uses: forbiddenlink/img-zen@main # no release tags exist yet; pin a commit SHA for stability
         with:
           paths: 'public/images, assets'
           ignore: 'node_modules/**'
@@ -50,7 +48,7 @@ jobs:
       - name: Commit Changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "⚡ ImgZen: Optimized images"
+          commit_message: "chore: optimize images with ImgZen"
 ```
 
 ## Inputs
@@ -58,7 +56,7 @@ jobs:
 | Input | Description | Default |
 |-------|-------------|---------|
 | `paths` | Comma-separated list of directories to scan. | `./` |
-| `ignore` | Comma-separated list of glob patterns to ignore. | `node_modules/**, target/**, dist/**` |
+| `ignore` | Comma-separated list of glob patterns to ignore. | `node_modules/**, target/**, dist/**` (the binary also ignores `.git/**`) |
 | `generate-formats` | Formats to generate (avif, webp). | `avif, webp` |
 | `responsive-widths` | Comma-separated list of widths (px) to generate resized variants for. | `(Disabled)` |
 | `inject-lazy-loading` | Inject `loading="lazy"` into HTML `<img>` tags. | `true` |
@@ -75,7 +73,7 @@ jobs:
 | `saved-size` | Total size saved by optimization. |
 | `report` | Markdown report of the optimization. |
 
-## Local Development & Testing
+## Local development and testing
 
 1. **Build**:
 
@@ -90,13 +88,21 @@ jobs:
    ./target/release/imgzen --paths ./sample_images --responsive-widths 500
    ```
 
-3. **Run E2E Tests**:
+3. **Run unit tests**:
+
+   ```bash
+   cargo test
+   ```
+
+4. **Run E2E Tests**:
 
    ```bash
    chmod +x tests/e2e.sh
    ./tests/e2e.sh
    ```
 
+   `tests/partial_failure.py` and `tests/invalid_inputs.py` are further regression scripts that take the path to the built binary.
+
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
