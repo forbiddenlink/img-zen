@@ -63,8 +63,9 @@ jobs:
 | `responsive-widths` | Comma-separated list of widths (px) to generate resized variants for. | `(Disabled)` |
 | `inject-lazy-loading` | Inject `loading="lazy"` into HTML `<img>` tags. | `true` |
 | `inject-picture` | Wrap `<img>` tags that have generated AVIF/WebP variants in `<picture>` with `srcset` widths. The original `<img>` stays as the fallback. Images without variants, with their own `srcset`, or already in a `<picture>` are left alone. | `true` |
-| `quality` | Quality for AVIF/WebP/JPEG encoding (1-100). | `75` |
+| `quality` | Quality for AVIF/WebP encoding, and for JPEG originals when `lossy-jpeg` is `true` (1-100). | `75` |
 | `png-level` | PNG optimization level (0-6, higher = slower but smaller). | `2` |
+| `lossy-jpeg` | Re-encode JPEG originals in place at `quality`. Lossy, and drops EXIF, ICC profile and orientation data. By default JPEG originals are not modified (PNG originals are still losslessly optimized). | `false` |
 
 ## Outputs
 
