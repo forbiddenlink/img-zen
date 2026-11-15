@@ -46,6 +46,11 @@ struct Args {
     /// degrades the file and drops EXIF/ICC/orientation metadata. Off by default.
     #[arg(long, env = "INPUT_LOSSY_JPEG", default_value = "false")]
     lossy_jpeg: String,
+
+    /// "optimize" (default) rewrites files. "check" changes nothing and exits non-zero
+    /// when any image could be optimized further.
+    #[arg(long, env = "INPUT_MODE", default_value = "optimize")]
+    mode: String,
 }
 
 struct Stats {
@@ -63,12 +68,28 @@ struct FileReport {
     generated_formats: Vec<String>,
 }
 
+/// Returns true for check mode, false for optimize mode.
+fn parse_mode(mode: &str) -> Result<bool> {
+    match mode {
+        "optimize" => Ok(false),
+        "check" => Ok(true),
+        other => anyhow::bail!("mode must be optimize or check, got {:?}", other),
+    }
+}
+
+/// Files an optimize run would shrink (used by check mode).
+fn unoptimized_files(stats: &Stats) -> Vec<&FileReport> {
+    stats.file_reports.iter().filter(|fr| fr.saved_bytes > 0).collect()
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     anyhow::ensure!(args.quality.is_finite() && (1.0..=100.0).contains(&args.quality), "quality must be finite and between 1 and 100");
     anyhow::ensure!(args.png_level <= 6, "png-level must be between 0 and 6");
     anyhow::ensure!(args.lossy_jpeg == "true" || args.lossy_jpeg == "false", "lossy-jpeg must be true or false");
     
+    let check = parse_mode(&args.mode)?;
+
     // Parse paths
     let paths: Vec<&str> = args.paths.split(',').map(|s| s.trim()).collect();
     anyhow::ensure!(paths.iter().all(|path| !path.is_empty()), "paths must not contain empty entries");
@@ -101,7 +122,7 @@ fn main() -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    println!("ImgZen Starting...");
+    println!("ImgZen Starting{}...", if check { " (check mode, no files will be changed)" } else { "" });
     println!("Scanning paths: {:?}", paths);
     if !responsive_widths.is_empty() {
         println!("Responsive widths: {:?}", responsive_widths);
@@ -140,7 +161,7 @@ fn main() -> Result<()> {
 
     let failures = AtomicUsize::new(0);
     image_files.par_iter().for_each(|path| {
-        if let Err(e) = process_image(path, gen_avif, gen_webp, &responsive_widths, quality, png_level, lossy_jpeg, &stats) {
+        if let Err(e) = process_image(path, gen_avif, gen_webp, &responsive_widths, quality, png_level, lossy_jpeg, check, &stats) {
             failures.fetch_add(1, Ordering::Relaxed);
             eprintln!("Failed to process {:?}: {}", path, e);
         }
@@ -148,7 +169,7 @@ fn main() -> Result<()> {
 
     // HTML rewriting: lazy loading and <picture> wrapping
     let picture = args.inject_picture == "true";
-    if args.inject_lazy_loading == "true" || picture {
+    if !check && (args.inject_lazy_loading == "true" || picture) {
         println!("Rewriting HTML...");
         // Collect HTML files
         let mut html_files = Vec::new();
@@ -180,9 +201,15 @@ fn main() -> Result<()> {
     let final_stats = stats.lock().unwrap();
     let failed_count = failures.load(Ordering::Relaxed);
     if failed_count == 0 {
-        println!("Optimization complete!");
+        println!("{}", if check { "Check complete." } else { "Optimization complete!" });
     } else {
         eprintln!("Optimization finished with {} failed operation(s).", failed_count);
+    }
+    let pending = if check { unoptimized_files(&final_stats) } else { Vec::new() };
+    if check {
+        for fr in &pending {
+            println!("Could save {}: {}", humansize::format_size(fr.saved_bytes, humansize::DECIMAL), fr.path);
+        }
     }
     println!("Processed {} files.", final_stats.files_count);
     println!("Original Size: {}", humansize::format_size(final_stats.original_size, humansize::DECIMAL));
@@ -210,13 +237,14 @@ fn main() -> Result<()> {
         }
 
         let mut report = format!(
-            "### ImgZen Optimization Report\n\n\
+            "### ImgZen {} Report\n\n\
             | Metric | Value |\n|---|---|\n\
             | Processed Files | {} |\n\
             | Original Size | {} |\n\
             | **Saved Size** | **{}** |\n\
             | Generated Assets | {} |\n\n\
             <details>\n<summary>Per-file details</summary>\n\n{}\n</details>",
+            if check { "Check" } else { "Optimization" },
             final_stats.files_count,
             humansize::format_size(final_stats.original_size, humansize::DECIMAL),
             humansize::format_size(final_stats.saved_bytes, humansize::DECIMAL),
@@ -244,6 +272,7 @@ fn main() -> Result<()> {
     }
     
     anyhow::ensure!(failed_count == 0, "{} optimization operation(s) failed", failed_count);
+    anyhow::ensure!(pending.is_empty(), "{} image(s) are not optimized. Run ImgZen in optimize mode to fix them.", pending.len());
     Ok(())
 }
 
@@ -369,7 +398,7 @@ fn rewrite_html(path: &Path, lazy: bool, picture_widths: Option<&[u32]>) -> Resu
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths: &[u32], quality: f32, png_level: u8, lossy_jpeg: bool, stats: &Arc<Mutex<Stats>>) -> Result<()> {
+fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths: &[u32], quality: f32, png_level: u8, lossy_jpeg: bool, check: bool, stats: &Arc<Mutex<Stats>>) -> Result<()> {
     // Load image
     let img = image::open(path).with_context(|| format!("Failed to open image {:?}", path))?;
     let metadata = std::fs::metadata(path)?;
@@ -384,7 +413,9 @@ fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths:
              let options = oxipng::Options::from_preset(png_level);
              if let Ok(optimized_data) = oxipng::optimize_from_memory(&original_bytes, &options) {
                  if optimized_data.len() < original_bytes.len() {
-                     std::fs::write(path, &optimized_data)?;
+                     if !check {
+                         std::fs::write(path, &optimized_data)?;
+                     }
                      saved_here = original_size as u64 - optimized_data.len() as u64;
                  }
              }
@@ -406,11 +437,28 @@ fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths:
             })();
             if let Some(optimized_data) = jpeg_result {
                 if optimized_data.len() < original_bytes.len() {
-                    std::fs::write(path, &optimized_data)?;
+                    if !check {
+                        std::fs::write(path, &optimized_data)?;
+                    }
                     saved_here = original_size as u64 - optimized_data.len() as u64;
                 }
             }
         }
+    }
+
+    // Check mode only measures: no variants, no resized copies.
+    if check {
+        let mut s = stats.lock().unwrap();
+        s.original_size += original_size;
+        s.saved_bytes += saved_here;
+        s.files_count += 1;
+        s.file_reports.push(FileReport {
+            path: path.to_string_lossy().to_string(),
+            original_size,
+            saved_bytes: saved_here,
+            generated_formats: Vec::new(),
+        });
+        return Ok(());
     }
 
     let (width, height) = (img.width(), img.height());
@@ -646,8 +694,8 @@ mod tests {
         let dir = fixture("jpeg-default", &[]);
         let (path, original) = jpeg_with_metadata(&dir, "photo.jpg");
         // quality 20 would shrink the file if it were re-encoded.
-        process_image(&path, false, false, &[], 20.0, 2, false, &empty_stats()).unwrap();
-        process_image(&path, false, false, &[], 20.0, 2, false, &empty_stats()).unwrap();
+        process_image(&path, false, false, &[], 20.0, 2, false, false, &empty_stats()).unwrap();
+        process_image(&path, false, false, &[], 20.0, 2, false, false, &empty_stats()).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
@@ -655,8 +703,63 @@ mod tests {
     fn lossy_opt_in_still_re_encodes_jpegs() {
         let dir = fixture("jpeg-lossy", &[]);
         let (path, original) = jpeg_with_metadata(&dir, "photo.jpg");
-        process_image(&path, false, false, &[], 20.0, 2, true, &empty_stats()).unwrap();
+        process_image(&path, false, false, &[], 20.0, 2, true, false, &empty_stats()).unwrap();
         let after = std::fs::read(&path).unwrap();
         assert!(after.len() < original.len());
+    }
+
+    /// An unoptimized PNG (flat colour saved with the image crate's default encoder) that oxipng can shrink.
+    fn loose_png(dir: &Path, name: &str) -> (std::path::PathBuf, Vec<u8>) {
+        let path = dir.join(name);
+        image::RgbaImage::from_pixel(200, 200, image::Rgba([10, 120, 200, 255])).save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        (path, bytes)
+    }
+
+    #[test]
+    fn check_mode_reports_savings_without_touching_files() {
+        let dir = fixture("check-png", &[]);
+        let (path, original) = loose_png(&dir, "flat.png");
+        let stats = empty_stats();
+        process_image(&path, true, true, &[100], 75.0, 2, false, true, &stats).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original, "check mode must not rewrite the original");
+        assert!(stats.lock().unwrap().saved_bytes > 0, "check mode should report the bytes an optimize run would save");
+        for extra in ["flat.webp", "flat.avif", "flat-100.png", "flat-100.webp"] {
+            assert!(!dir.join(extra).exists(), "check mode must not create {extra}");
+        }
+    }
+
+    #[test]
+    fn optimize_mode_still_rewrites_the_same_png() {
+        let dir = fixture("check-control", &[]);
+        let (path, original) = loose_png(&dir, "flat.png");
+        let stats = empty_stats();
+        process_image(&path, false, false, &[], 75.0, 2, false, false, &stats).unwrap();
+        assert!(std::fs::read(&path).unwrap().len() < original.len());
+        assert_eq!(stats.lock().unwrap().saved_bytes as usize, original.len() - std::fs::read(&path).unwrap().len());
+    }
+
+    #[test]
+    fn unoptimized_files_lists_only_files_with_savings() {
+        let stats = Stats {
+            original_size: 0,
+            saved_bytes: 0,
+            generated_bytes: 0,
+            files_count: 2,
+            file_reports: vec![
+                FileReport { path: "a.png".into(), original_size: 100, saved_bytes: 0, generated_formats: vec![] },
+                FileReport { path: "b.png".into(), original_size: 100, saved_bytes: 40, generated_formats: vec![] },
+            ],
+        };
+        let found = unoptimized_files(&stats);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, "b.png");
+    }
+
+    #[test]
+    fn mode_parses_known_values_only() {
+        assert_eq!(parse_mode("optimize").unwrap(), false);
+        assert_eq!(parse_mode("check").unwrap(), true);
+        assert!(parse_mode("dry-run").is_err());
     }
 }
