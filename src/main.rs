@@ -41,6 +41,11 @@ struct Args {
     /// PNG optimization level (0-6, higher = slower but smaller)
     #[arg(long, env = "INPUT_PNG_LEVEL", default_value = "2")]
     png_level: u8,
+
+    /// Re-encode JPEG originals in place at the given quality. Lossy: every run
+    /// degrades the file and drops EXIF/ICC/orientation metadata. Off by default.
+    #[arg(long, env = "INPUT_LOSSY_JPEG", default_value = "false")]
+    lossy_jpeg: String,
 }
 
 struct Stats {
@@ -62,6 +67,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     anyhow::ensure!(args.quality.is_finite() && (1.0..=100.0).contains(&args.quality), "quality must be finite and between 1 and 100");
     anyhow::ensure!(args.png_level <= 6, "png-level must be between 0 and 6");
+    anyhow::ensure!(args.lossy_jpeg == "true" || args.lossy_jpeg == "false", "lossy-jpeg must be true or false");
     
     // Parse paths
     let paths: Vec<&str> = args.paths.split(',').map(|s| s.trim()).collect();
@@ -130,10 +136,11 @@ fn main() -> Result<()> {
 
     let quality = args.quality;
     let png_level = args.png_level;
+    let lossy_jpeg = args.lossy_jpeg == "true";
 
     let failures = AtomicUsize::new(0);
     image_files.par_iter().for_each(|path| {
-        if let Err(e) = process_image(path, gen_avif, gen_webp, &responsive_widths, quality, png_level, &stats) {
+        if let Err(e) = process_image(path, gen_avif, gen_webp, &responsive_widths, quality, png_level, lossy_jpeg, &stats) {
             failures.fetch_add(1, Ordering::Relaxed);
             eprintln!("Failed to process {:?}: {}", path, e);
         }
@@ -361,7 +368,8 @@ fn rewrite_html(path: &Path, lazy: bool, picture_widths: Option<&[u32]>) -> Resu
     Ok(())
 }
 
-fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths: &[u32], quality: f32, png_level: u8, stats: &Arc<Mutex<Stats>>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths: &[u32], quality: f32, png_level: u8, lossy_jpeg: bool, stats: &Arc<Mutex<Stats>>) -> Result<()> {
     // Load image
     let img = image::open(path).with_context(|| format!("Failed to open image {:?}", path))?;
     let metadata = std::fs::metadata(path)?;
@@ -380,8 +388,10 @@ fn process_image(path: &Path, gen_avif: bool, gen_webp: bool, responsive_widths:
                      saved_here = original_size as u64 - optimized_data.len() as u64;
                  }
              }
-        } else if ext_lower == "jpg" || ext_lower == "jpeg" {
-            // Optimize JPEG with mozjpeg
+        } else if (ext_lower == "jpg" || ext_lower == "jpeg") && lossy_jpeg {
+            // Opt-in only (--lossy-jpeg): this decodes to RGB and re-encodes, which loses
+            // quality on every run and drops EXIF, ICC profile and orientation metadata.
+            // By default JPEG originals are left byte-for-byte untouched.
             let rgb = img.to_rgb8();
             let (w, h) = (img.width() as usize, img.height() as usize);
             let jpeg_result: Option<Vec<u8>> = (|| {
@@ -602,5 +612,51 @@ mod tests {
         let dir = fixture("off", &["photo.avif"]);
         let out = rewrite_html_str(r#"<img src="photo.png">"#, &dir, true, None).unwrap();
         assert_eq!(out, r#"<img src="photo.png" loading="lazy">"#);
+    }
+
+    /// Minimal valid JPEG with an APP1 (EXIF-like) and an APP2 (ICC-like) segment inserted after SOI.
+    fn jpeg_with_metadata(dir: &Path, name: &str) -> (std::path::PathBuf, Vec<u8>) {
+        let mut plain = std::io::Cursor::new(Vec::new());
+        let mut rgb = image::RgbImage::new(64, 64);
+        for (x, y, px) in rgb.enumerate_pixels_mut() {
+            *px = image::Rgb([(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8]);
+        }
+        image::DynamicImage::ImageRgb8(rgb)
+            .write_to(&mut plain, image::ImageFormat::Jpeg)
+            .unwrap();
+        let plain = plain.into_inner();
+        let mut bytes = vec![0xFF, 0xD8];
+        for (marker, payload) in [(0xE1u8, &b"Exif\0\0orientation-marker"[..]), (0xE2u8, &b"ICC_PROFILE\0\x01\x01fake"[..])] {
+            bytes.extend_from_slice(&[0xFF, marker]);
+            bytes.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            bytes.extend_from_slice(payload);
+        }
+        bytes.extend_from_slice(&plain[2..]);
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    fn empty_stats() -> Arc<Mutex<Stats>> {
+        Arc::new(Mutex::new(Stats { original_size: 0, saved_bytes: 0, generated_bytes: 0, files_count: 0, file_reports: Vec::new() }))
+    }
+
+    #[test]
+    fn default_run_leaves_jpeg_bytes_and_metadata_untouched() {
+        let dir = fixture("jpeg-default", &[]);
+        let (path, original) = jpeg_with_metadata(&dir, "photo.jpg");
+        // quality 20 would shrink the file if it were re-encoded.
+        process_image(&path, false, false, &[], 20.0, 2, false, &empty_stats()).unwrap();
+        process_image(&path, false, false, &[], 20.0, 2, false, &empty_stats()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn lossy_opt_in_still_re_encodes_jpegs() {
+        let dir = fixture("jpeg-lossy", &[]);
+        let (path, original) = jpeg_with_metadata(&dir, "photo.jpg");
+        process_image(&path, false, false, &[], 20.0, 2, true, &empty_stats()).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.len() < original.len());
     }
 }

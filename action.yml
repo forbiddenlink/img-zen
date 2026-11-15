@@ -37,6 +37,10 @@ inputs:
     description: 'PNG optimization level (0-6, higher = slower but smaller)'
     required: false
     default: '2'
+  lossy-jpeg:
+    description: 'Re-encode JPEG originals in place at `quality` (lossy, drops EXIF/ICC metadata). Off by default: JPEG originals are left untouched.'
+    required: false
+    default: 'false'
 outputs:
   saved-size:
     description: 'Total size saved by optimization'
@@ -45,3 +49,6 @@ outputs:
 runs:
   using: 'docker'
   image: 'Dockerfile'
+  env:
+    # GitHub exposes this input as INPUT_LOSSY-JPEG (hyphen); the binary reads INPUT_LOSSY_JPEG.
+    INPUT_LOSSY_JPEG: ${{ inputs.lossy-jpeg }}
