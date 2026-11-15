@@ -66,6 +66,7 @@ jobs:
 | `quality` | Quality for AVIF/WebP encoding, and for JPEG originals when `lossy-jpeg` is `true` (1-100). | `75` |
 | `png-level` | PNG optimization level (0-6, higher = slower but smaller). | `2` |
 | `lossy-jpeg` | Re-encode JPEG originals in place at `quality`. Lossy, and drops EXIF, ICC profile and orientation data. By default JPEG originals are not modified (PNG originals are still losslessly optimized). | `false` |
+| `mode` | `optimize` rewrites images in place. `check` changes no files and fails the step when a PNG could be losslessly optimized further (JPEGs count only with `lossy-jpeg: true`). | `optimize` |
 
 ## Outputs
 

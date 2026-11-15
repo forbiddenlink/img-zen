@@ -41,6 +41,10 @@ inputs:
     description: 'Re-encode JPEG originals in place at `quality` (lossy, drops EXIF/ICC metadata). Off by default: JPEG originals are left untouched.'
     required: false
     default: 'false'
+  mode:
+    description: '`optimize` (default) rewrites images in place. `check` changes nothing and fails the step when any image could be optimized further, so CI can gate without a bot committing.'
+    required: false
+    default: 'optimize'
 outputs:
   saved-size:
     description: 'Total size saved by optimization'
