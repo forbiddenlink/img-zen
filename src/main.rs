@@ -5,6 +5,7 @@ use std::env;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -59,20 +60,23 @@ struct FileReport {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    anyhow::ensure!(args.quality.is_finite() && (1.0..=100.0).contains(&args.quality), "quality must be finite and between 1 and 100");
+    anyhow::ensure!(args.png_level <= 6, "png-level must be between 0 and 6");
     
     // Parse paths
     let paths: Vec<&str> = args.paths.split(',').map(|s| s.trim()).collect();
+    anyhow::ensure!(paths.iter().all(|path| !path.is_empty()), "paths must not contain empty entries");
 
     // Build glob matcher for ignore patterns
     let mut glob_builder = globset::GlobSetBuilder::new();
     for pattern in args.ignore.split(',').map(|s| s.trim()) {
         if !pattern.is_empty() {
-            if let Ok(glob) = globset::Glob::new(pattern) {
-                glob_builder.add(glob);
-            }
+            let glob = globset::Glob::new(pattern)
+                .with_context(|| format!("Invalid ignore pattern: {}", pattern))?;
+            glob_builder.add(glob);
         }
     }
-    let ignore_globs = glob_builder.build().unwrap_or_else(|_| globset::GlobSet::empty());
+    let ignore_globs = glob_builder.build().context("Failed to build ignore patterns")?;
     
     // Parse formats
     let formats: Vec<&str> = args.generate_formats.split(',').map(|s| s.trim()).collect();
@@ -84,8 +88,12 @@ fn main() -> Result<()> {
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse().ok())
-        .collect();
+        .map(|s| {
+            let width: u32 = s.parse().with_context(|| format!("Invalid responsive width: {}", s))?;
+            anyhow::ensure!(width > 0, "responsive widths must be positive");
+            Ok(width)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     println!("ImgZen Starting...");
     println!("Scanning paths: {:?}", paths);
@@ -104,7 +112,8 @@ fn main() -> Result<()> {
     // Collect all image files
     let mut image_files = Vec::new();
     for path in &paths {
-        for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(path) {
+            let entry = entry.with_context(|| format!("Failed to traverse {:?}", path))?;
             let path = entry.path();
             if path.is_file() && !ignore_globs.is_match(path) {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -122,8 +131,10 @@ fn main() -> Result<()> {
     let quality = args.quality;
     let png_level = args.png_level;
 
+    let failures = AtomicUsize::new(0);
     image_files.par_iter().for_each(|path| {
         if let Err(e) = process_image(path, gen_avif, gen_webp, &responsive_widths, quality, png_level, &stats) {
+            failures.fetch_add(1, Ordering::Relaxed);
             eprintln!("Failed to process {:?}: {}", path, e);
         }
     });
@@ -135,7 +146,8 @@ fn main() -> Result<()> {
         // Collect HTML files
         let mut html_files = Vec::new();
         for path in &paths {
-             for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+             for entry in WalkDir::new(path) {
+                let entry = entry.with_context(|| format!("Failed to traverse {:?}", path))?;
                 let path = entry.path();
                 if path.is_file() && !ignore_globs.is_match(path) {
                     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -152,13 +164,19 @@ fn main() -> Result<()> {
         let picture_widths = if picture { Some(responsive_widths.as_slice()) } else { None };
         html_files.par_iter().for_each(|path| {
             if let Err(e) = rewrite_html(path, lazy, picture_widths) {
+                failures.fetch_add(1, Ordering::Relaxed);
                 eprintln!("Failed to rewrite HTML in {:?}: {}", path, e);
             }
         });
     }
 
     let final_stats = stats.lock().unwrap();
-    println!("Optimization complete!");
+    let failed_count = failures.load(Ordering::Relaxed);
+    if failed_count == 0 {
+        println!("Optimization complete!");
+    } else {
+        eprintln!("Optimization finished with {} failed operation(s).", failed_count);
+    }
     println!("Processed {} files.", final_stats.files_count);
     println!("Original Size: {}", humansize::format_size(final_stats.original_size, humansize::DECIMAL));
     println!("Saved: {}", humansize::format_size(final_stats.saved_bytes, humansize::DECIMAL));
@@ -184,7 +202,7 @@ fn main() -> Result<()> {
             ));
         }
 
-        let report = format!(
+        let mut report = format!(
             "### ImgZen Optimization Report\n\n\
             | Metric | Value |\n|---|---|\n\
             | Processed Files | {} |\n\
@@ -198,6 +216,10 @@ fn main() -> Result<()> {
             humansize::format_size(final_stats.generated_bytes, humansize::DECIMAL),
             file_table
         );
+
+        if failed_count > 0 {
+            report.push_str(&format!("\n\n**Incomplete:** {} operation(s) failed. See logs for details.\n", failed_count));
+        }
 
         // Write to GITHUB_OUTPUT (replaces deprecated ::set-output)
         if let Ok(output_path) = env::var("GITHUB_OUTPUT") {
@@ -214,6 +236,7 @@ fn main() -> Result<()> {
         }
     }
     
+    anyhow::ensure!(failed_count == 0, "{} optimization operation(s) failed", failed_count);
     Ok(())
 }
 
